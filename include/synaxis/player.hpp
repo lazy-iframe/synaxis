@@ -1,0 +1,28 @@
+// Synaxis: a simple offline media aggregator and player
+// Copyright (C) 2026  Azhar Tanweer (azhar.tanweer404@gmail.com)
+
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+#pragma once
+
+#include <filesystem>
+
+namespace synaxis {
+
+class Player {
+public:
+    // Plays the file at `path` via libmpv, blocking until playback ends or
+    // the user quits the mpv window. Returns false if the file could not be
+    // opened/played.
+    static bool Play(const std::filesystem::path& path);
+};
+
+} // namespace synaxis
