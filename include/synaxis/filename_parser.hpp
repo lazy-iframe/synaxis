@@ -21,14 +21,17 @@ namespace synaxis {
 
 // Result of parsing a single media filename. Fields are nullopt/empty when
 // no recognized pattern is found. Resolution/codec are intentionally not
-// handled here — those are properties of the encoded stream and get
-// inspected via libmpv instead. Source (WEB-DL/BluRay/HDTV/CAM/HDTS/...) and
-// edition tags (PROPER/REPACK/IMAX/HDR/AMZN/NF/...) describe how the file
-// was ripped or released, which isn't recoverable from the stream itself,
-// so they have to come from the filename like season/episode. `title` is a
-// fallback series/movie name derived from the filename itself, for when the
-// user doesn't supply one; `year` (movies) doubles as the signal that lets
-// `title` know where to stop when there's no season/episode marker.
+// stored — those are properties of the encoded stream, and the filename's
+// claim about them is unverified, so they get inspected via libmpv instead.
+// (Resolution is still *matched* during parsing, purely to find where the
+// title ends; the matched value is discarded.) Source
+// (WEB-DL/BluRay/HDTV/CAM/HDTS/...) and edition tags
+// (PROPER/REPACK/IMAX/HDR/AMZN/NF/...) describe how the file was ripped or
+// released, which isn't recoverable from the stream itself, so they have to
+// come from the filename like season/episode. `title` is a fallback
+// series/movie name derived from the filename itself, for when the user
+// doesn't supply one; `year` (movies) doubles as the signal that lets `title`
+// know where to stop when there's no season/episode marker.
 struct ParsedFilename {
     std::optional<int> season;
     std::optional<int> episode;

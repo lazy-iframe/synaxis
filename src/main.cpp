@@ -26,8 +26,6 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr const char* kLibraryPath = "library.json";
-
 #ifndef SYNAXIS_VERSION
 #define SYNAXIS_VERSION "unknown"
 #endif
@@ -71,14 +69,22 @@ void PrintUsage(const char* argv0) {
     std::cerr << "usage:\n"
               << "  " << argv0 << " --version\n"
               << "      print version, copyright, and license notice\n"
-              << "  " << argv0 << " -d <directory> [-x <ext1,ext2,...>]\n"
-              << "      scan <directory> and (re)build " << kLibraryPath << "\n"
+              << "  " << argv0 << " -d <directory> [-x <ext1,ext2,...>] [--library <path>]\n"
+              << "      scan <directory> and (re)build the library\n"
               << "      -x restricts scanning to the given extensions, a subset of the\n"
               << "         built-in defaults (comma-separated, no leading dot)\n"
-              << "  " << argv0 << " -p -f <series name> -s <season> -e <episode>\n"
+              << "  " << argv0 << " -p -f <series name> -s <season> -e <episode> [-b <backend>]\n"
               << "      play a TV episode\n"
-              << "  " << argv0 << " -p -f <movie name> [-y <year>]\n"
-              << "      play a movie\n";
+              << "  " << argv0 << " -p -f <movie name> [-y <year>] [-b <backend>]\n"
+              << "      play a movie\n"
+              << "      -f matches any part of a title, ignoring case; if several\n"
+              << "         files match, you'll be prompted to pick one.\n"
+              << "      -b selects the playback backend: mpv (default) or vlc.\n"
+              << "         The vlc window has no keyboard controls or OSD; it can only\n"
+              << "         be closed. Use mpv for interactive playback.\n"
+              << "  --library <path> overrides where the library is read/written.\n"
+              << "      Defaults to " << synaxis::MediaLibrary::DefaultLibraryPath().string()
+              << "\n";
 }
 
 struct Args {
@@ -89,6 +95,8 @@ struct Args {
     std::optional<int> episode;
     std::optional<int> year;
     std::optional<std::vector<std::string>> extensions;
+    std::optional<synaxis::Player::Backend> backend;
+    std::optional<std::string> library;
 };
 
 // Splits a comma-separated list, trimming whitespace and any leading dot
@@ -151,6 +159,21 @@ std::optional<Args> ParseArgs(int argc, char** argv) {
             auto v = next_value(i);
             if (!v) { std::cerr << "error: -x requires a comma-separated extension list\n"; return std::nullopt; }
             args.extensions = SplitExtensionList(*v);
+        } else if (flag == "--library") {
+            auto v = next_value(i);
+            if (!v) { std::cerr << "error: --library requires a path\n"; return std::nullopt; }
+            args.library = *v;
+        } else if (flag == "-b") {
+            auto v = next_value(i);
+            if (!v) { std::cerr << "error: -b requires a backend (mpv or vlc)\n"; return std::nullopt; }
+            if (*v == "mpv") {
+                args.backend = synaxis::Player::Backend::Mpv;
+            } else if (*v == "vlc") {
+                args.backend = synaxis::Player::Backend::Vlc;
+            } else {
+                std::cerr << "error: unknown backend \"" << *v << "\". Available backends: mpv, vlc\n";
+                return std::nullopt;
+            }
         } else {
             std::cerr << "error: unrecognized argument: " << flag << "\n";
             return std::nullopt;
@@ -209,16 +232,16 @@ std::string JoinExtensions(const std::vector<std::string>& extensions) {
     return joined;
 }
 
-int RunScan(const std::string& directory, const std::optional<std::vector<std::string>>& extensions) {
-    fs::path root(directory);
+int RunScan(const Args& args, const fs::path& library_path) {
+    fs::path root(*args.directory);
     if (!fs::is_directory(root)) {
         std::cerr << "error: not a directory: " << root << "\n";
         return 1;
     }
 
     const auto& defaults = synaxis::MediaLibrary::DefaultVideoExtensions();
-    if (extensions) {
-        for (const auto& ext : *extensions) {
+    if (args.extensions) {
+        for (const auto& ext : *args.extensions) {
             bool known = std::any_of(defaults.begin(), defaults.end(),
                                       [&](const std::string& d) { return EqualsIgnoreCase(d, ext); });
             if (!known) {
@@ -229,18 +252,29 @@ int RunScan(const std::string& directory, const std::optional<std::vector<std::s
         }
     }
 
-    std::vector<synaxis::MediaEntry> entries =
-        synaxis::MediaLibrary::Scan(root, extensions.value_or(std::vector<std::string>{}));
+    // Progress goes to stderr so stdout stays exactly the parsed listing —
+    // pipelines reading it are unaffected. Never cancels; the CLI has no way
+    // for the user to ask.
+    auto on_progress = [](const synaxis::ScanProgress& progress) {
+        std::cerr << "\rscanning… " << progress.files_indexed << " indexed, "
+                   << progress.files_seen << " seen" << std::flush;
+        return true;
+    };
+
+    std::vector<synaxis::MediaEntry> entries = synaxis::MediaLibrary::Scan(
+        root, args.extensions.value_or(std::vector<std::string>{}), on_progress);
+    std::cerr << "\r\033[K" << std::flush;
+
     for (const auto& entry : entries) {
         PrintParsed(entry.path, entry.metadata);
     }
 
-    synaxis::MediaLibrary::SaveToJson(entries, kLibraryPath);
-    std::cout << entries.size() << " files indexed -> " << kLibraryPath << "\n";
+    synaxis::MediaLibrary::SaveToJson(entries, library_path);
+    std::cout << entries.size() << " files indexed -> " << library_path.string() << "\n";
     return 0;
 }
 
-int RunPlay(const Args& args) {
+int RunPlay(const Args& args, const fs::path& library_path) {
     if (!args.name) {
         std::cerr << "error: -p requires -f <name>\n";
         return 1;
@@ -250,34 +284,27 @@ int RunPlay(const Args& args) {
         return 1;
     }
 
-    if (!fs::exists(kLibraryPath)) {
-        std::cerr << "error: " << kLibraryPath << " not found — run '-d <directory>' first "
-                                                    "to build the library.\n";
+    if (!fs::exists(library_path)) {
+        std::cerr << "error: " << library_path.string()
+                   << " not found — run '-d <directory>' first to build the library.\n";
         return 1;
     }
 
-    std::vector<synaxis::MediaEntry> library = synaxis::MediaLibrary::LoadFromJson(kLibraryPath);
+    std::vector<synaxis::MediaEntry> library = synaxis::MediaLibrary::LoadFromJson(library_path);
 
-    std::vector<synaxis::MediaEntry> candidates;
-    for (const auto& entry : library) {
-        const auto& m = entry.metadata;
-        if (!m.title || !EqualsIgnoreCase(*m.title, *args.name)) continue;
-
-        if (args.season && args.episode) {
-            // TV lookup: season/episode must match exactly.
-            if (m.season != *args.season || m.episode != *args.episode) continue;
-        } else {
-            // Movie lookup: exclude anything that looks like a TV episode,
-            // and narrow by year if the user gave one.
-            if (m.season || m.episode) continue;
-            if (args.year && m.year != *args.year) continue;
-        }
-
-        candidates.push_back(entry);
+    synaxis::MediaQuery query;
+    query.name = *args.name;
+    if (args.season && args.episode) {
+        query.episode = synaxis::MediaQuery::EpisodeRef{*args.season, *args.episode};
+    } else {
+        query.year = args.year;
     }
 
+    std::vector<synaxis::MediaEntry> candidates = synaxis::MediaLibrary::Find(library, query);
+
     if (candidates.empty()) {
-        std::cerr << "error: no match found for \"" << *args.name << "\" in " << kLibraryPath
+        std::cerr << "error: no match found for \"" << *args.name << "\" in "
+                   << library_path.string()
                    << ". Check the name/season/episode/year, or re-run '-d <directory>' if the "
                       "library is out of date.\n";
         return 1;
@@ -289,7 +316,8 @@ int RunPlay(const Args& args) {
     } else {
         // Same name, still ambiguous (e.g. two movies sharing a title) —
         // defer to the user to pick, showing year/season/episode as the
-        // distinguishing details.
+        // distinguishing details. A GUI resolves the same Find() result with
+        // a list instead.
         auto picked = PromptForChoice(candidates);
         if (!picked) {
             std::cerr << "error: no selection made\n";
@@ -300,11 +328,12 @@ int RunPlay(const Args& args) {
 
     if (!fs::exists(chosen.path)) {
         std::cerr << "error: file no longer exists on disk: " << chosen.path.string()
-                   << ". Re-run '-d <directory>' to refresh " << kLibraryPath << ".\n";
+                   << ". Re-run '-d <directory>' to refresh " << library_path.string() << ".\n";
         return 1;
     }
 
-    if (!synaxis::Player::Play(chosen.path)) {
+    synaxis::Player player(args.backend.value_or(synaxis::Player::Backend::Mpv));
+    if (!player.Open(chosen.path) || !player.WaitUntilFinished()) {
         std::cerr << "error: playback failed for " << chosen.path.string() << "\n";
         return 1;
     }
@@ -340,9 +369,17 @@ int main(int argc, char** argv) {
         PrintUsage(argv[0]);
         return 1;
     }
+    if (args.backend && !args.play) {
+        std::cerr << "error: -b requires -p\n";
+        PrintUsage(argv[0]);
+        return 1;
+    }
 
-    if (args.directory) return RunScan(*args.directory, args.extensions);
-    if (args.play) return RunPlay(args);
+    const fs::path library_path = args.library ? fs::path(*args.library)
+                                                : synaxis::MediaLibrary::DefaultLibraryPath();
+
+    if (args.directory) return RunScan(args, library_path);
+    if (args.play) return RunPlay(args, library_path);
 
     PrintUsage(argv[0]);
     return 1;

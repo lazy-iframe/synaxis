@@ -13,60 +13,134 @@
 
 #include "synaxis/player.hpp"
 
-#include <mpv/client.h>
+#include "player_backend.hpp"
 
-#include <iostream>
+#include <condition_variable>
+#include <mutex>
 
 namespace synaxis {
 
-bool Player::Play(const std::filesystem::path& path) {
-    mpv_handle* mpv = mpv_create();
-    if (!mpv) {
-        std::cerr << "error: failed to create mpv instance\n";
-        return false;
+// Everything here is backend-agnostic: the backends report status, and this
+// layer caches it, wakes waiters, and forwards to the user. Keeping it out of
+// the backends means a new one only has to drive its library.
+class Player::Impl {
+public:
+    explicit Impl(Backend backend) : backend_kind_(backend) {}
+
+    void SetStatusCallback(StatusCallback callback) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        user_callback_ = std::move(callback);
     }
 
-    mpv_set_option_string(mpv, "input-default-bindings", "yes");
-    mpv_set_option_string(mpv, "input-vo-keyboard", "yes");
+    bool Open(const std::filesystem::path& path) {
+        if (!EnsureBackend()) return false;
 
-    if (mpv_initialize(mpv) < 0) {
-        std::cerr << "error: failed to initialize mpv\n";
-        mpv_terminate_destroy(mpv);
-        return false;
-    }
-
-    const std::string path_str = path.string();
-    const char* cmd[] = {"loadfile", path_str.c_str(), nullptr};
-    if (mpv_command(mpv, cmd) < 0) {
-        std::cerr << "error: failed to load file: " << path_str << "\n";
-        mpv_terminate_destroy(mpv);
-        return false;
-    }
-
-    bool ok = true;
-    for (bool playing = true; playing;) {
-        mpv_event* event = mpv_wait_event(mpv, -1);
-        switch (event->event_id) {
-            case MPV_EVENT_END_FILE: {
-                auto* end_file = static_cast<mpv_event_end_file*>(event->data);
-                if (end_file->reason == MPV_END_FILE_REASON_ERROR) {
-                    std::cerr << "error: playback failed: " << mpv_error_string(end_file->error)
-                              << "\n";
-                    ok = false;
-                }
-                playing = false;
-                break;
-            }
-            case MPV_EVENT_SHUTDOWN:
-                playing = false;
-                break;
-            default:
-                break;
+        // Reset before handing off: the backend may report Playing from
+        // another thread before Open() has even returned.
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            status_ = Status{};
+            status_.state = State::Loading;
         }
+
+        if (!backend_->Open(path)) {
+            Publish([](Status& s) { s.state = State::Error; });
+            return false;
+        }
+        return true;
     }
 
-    mpv_terminate_destroy(mpv);
-    return ok;
+    void Pause() {
+        if (backend_) backend_->Pause();
+    }
+
+    void Resume() {
+        if (backend_) backend_->Resume();
+    }
+
+    void Stop() {
+        if (backend_) backend_->Stop();
+    }
+
+    void Seek(double seconds) {
+        if (backend_) backend_->Seek(seconds);
+    }
+
+    Status GetStatus() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return status_;
+    }
+
+    bool WaitUntilFinished() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        finished_.wait(lock, [this] {
+            return status_.state == State::Ended || status_.state == State::Error;
+        });
+        return status_.state != State::Error;
+    }
+
+private:
+    // Deferred so that constructing a Player never fails or opens a window;
+    // the library only gets initialized once there's something to play.
+    bool EnsureBackend() {
+        if (backend_) return true;
+
+        auto handler = [this](const Status& status) { OnBackendStatus(status); };
+        backend_ = backend_kind_ == Backend::Vlc ? detail::MakeVlcBackend(handler)
+                                                  : detail::MakeMpvBackend(handler);
+        return backend_ != nullptr;
+    }
+
+    void OnBackendStatus(const Status& status) {
+        Publish([&status](Status& s) { s = status; });
+    }
+
+    // Applies `mutate` to the cached status, wakes any waiter, then invokes
+    // the user callback with the lock released — the callback is arbitrary
+    // code and must never run while holding our mutex.
+    template <typename Mutate>
+    void Publish(Mutate&& mutate) {
+        StatusCallback callback;
+        Status snapshot;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            mutate(status_);
+            snapshot = status_;
+            callback = user_callback_;
+        }
+        finished_.notify_all();
+        if (callback) callback(snapshot);
+    }
+
+    mutable std::mutex mutex_;
+    std::condition_variable finished_;
+    Status status_;
+    StatusCallback user_callback_;
+
+    Backend backend_kind_;
+    std::unique_ptr<detail::PlayerBackend> backend_;
+};
+
+Player::Player(Backend backend) : impl_(std::make_unique<Impl>(backend)) {}
+
+Player::~Player() = default;
+
+void Player::SetStatusCallback(StatusCallback callback) {
+    impl_->SetStatusCallback(std::move(callback));
 }
+
+bool Player::Open(const std::filesystem::path& path) { return impl_->Open(path); }
+
+void Player::Pause() { impl_->Pause(); }
+
+void Player::Resume() { impl_->Resume(); }
+
+void Player::Stop() { impl_->Stop(); }
+
+void Player::Seek(double seconds) { impl_->Seek(seconds); }
+
+Player::Status Player::GetStatus() const { return impl_->GetStatus(); }
+
+bool Player::WaitUntilFinished() { return impl_->WaitUntilFinished(); }
 
 } // namespace synaxis

@@ -1,2 +1,9 @@
 # build files
 build
+
+# tests
+tests
+
+# generated library index (machine-specific absolute paths); the real one
+# lives under $XDG_DATA_HOME/synaxis/
+library.json

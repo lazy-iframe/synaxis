@@ -78,6 +78,17 @@ ParsedFilename FilenameParser::parse(const std::string& filename) {
         consider_cutoff(match.position(0));
     }
 
+    // Resolution — matched but deliberately never stored. A filename's claim
+    // about resolution is just a claim (see ParsedFilename), and the real
+    // value comes from the stream. It's still worth matching because it's a
+    // dependable marker of where the title ends: a movie with no year in its
+    // name would otherwise have its title run on until the source tag,
+    // swallowing the resolution along the way.
+    static const std::regex kResolutionPattern(R"(\b\d{3,4}[pi]\b)", std::regex::icase);
+    if (std::regex_search(filename, match, kResolutionPattern)) {
+        consider_cutoff(match.position(0));
+    }
+
     // Rip source — describes how the file was captured, not something
     // an encoded stream can reveal, so it must come from the filename.
     static const std::regex kSourcePattern(
