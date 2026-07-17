@@ -23,6 +23,8 @@ Window {
     title: qsTr("Synaxis")
     color: Theme.background
 
+    property bool settingsOpen: false
+
     Component.onCompleted: Library.Reload()
 
     // The shelves, with the hero riding along as the header so the whole page
@@ -97,6 +99,40 @@ Window {
             font.bold: true
             font.letterSpacing: 2
         }
+
+        // Settings. Hidden during playback along with the rest of the nav
+        // bar's purpose — there's nothing to configure mid-film, and the
+        // overlay already owns the window at that point.
+        Text {
+            visible: !Library.playing
+            anchors {
+                right: parent.right
+                rightMargin: Theme.gutter
+                verticalCenter: parent.verticalCenter
+            }
+            text: "⚙"
+            color: settingsHover.hovered ? Theme.textPrimary : Theme.textSecondary
+            font.pixelSize: 24
+
+            HoverHandler { id: settingsHover }
+            TapHandler { onTapped: root.settingsOpen = true }
+        }
+    }
+
+    // Settings, over everything else while open. Loaded rather than merely
+    // hidden so its FolderDialog and text fields reset to the persisted
+    // config each time it's reopened, the same reasoning as the player
+    // overlay below.
+    Loader {
+        anchors.fill: parent
+        active: root.settingsOpen
+        z: 100
+
+        sourceComponent: SettingsPage {
+            onClosed: root.settingsOpen = false
+        }
+
+        onLoaded: item.forceActiveFocus()
     }
 
     // Playback takes the whole window, over everything else.

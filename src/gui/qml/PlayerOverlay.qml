@@ -95,7 +95,7 @@ Item {
             NumberAnimation { duration: Theme.fadeDuration }
         }
 
-        // Top scrim + title + close.
+        // Top scrim + back + title.
         Rectangle {
             anchors { left: parent.left; right: parent.right; top: parent.top }
             height: 96
@@ -104,30 +104,30 @@ Item {
                 GradientStop { position: 1.0; color: "transparent" }
             }
 
-            Text {
+            Row {
                 anchors {
                     left: parent.left
                     leftMargin: Theme.gutter
                     verticalCenter: parent.verticalCenter
                 }
-                text: Library.playingTitle
-                color: Theme.textPrimary
-                font.pixelSize: 22
-                font.bold: true
-            }
+                spacing: 20
 
-            Text {
-                anchors {
-                    right: parent.right
-                    rightMargin: Theme.gutter
-                    verticalCenter: parent.verticalCenter
+                Text {
+                    text: "←"
+                    color: backHover.hovered ? Theme.textPrimary : Theme.textSecondary
+                    font.pixelSize: 26
+
+                    HoverHandler { id: backHover }
+                    TapHandler { onTapped: Library.Close() }
                 }
-                text: "✕"
-                color: closeHover.hovered ? Theme.textPrimary : Theme.textSecondary
-                font.pixelSize: 26
 
-                HoverHandler { id: closeHover }
-                TapHandler { onTapped: Library.Close() }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: Library.playingTitle
+                    color: Theme.textPrimary
+                    font.pixelSize: 22
+                    font.bold: true
+                }
             }
         }
 

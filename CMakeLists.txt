@@ -124,12 +124,14 @@ endif()
 
 if(SYNAXIS_BUILD_GUI)
     # 6.5 is the floor for qt_standard_project_setup(REQUIRES) and for
-    # loadFromModule(), both of which this target uses.
-    find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Network Quick)
+    # loadFromModule(), both of which this target uses. QuickDialogs2 backs
+    # the settings page's directory picker (QtQuick.Dialogs' FolderDialog).
+    find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Network Quick QuickDialogs2)
     qt_standard_project_setup(REQUIRES 6.5)
 
     qt_add_executable(synaxis_gui
         src/gui/main.cpp
+        src/gui/app_config.cpp
         src/gui/library_controller.cpp
         src/gui/mpv_item.cpp
         src/gui/shelf_model.cpp
@@ -160,7 +162,9 @@ if(SYNAXIS_BUILD_GUI)
             src/gui/qml/Tile.qml
             src/gui/qml/Theme.qml
             src/gui/qml/PlayerOverlay.qml
+            src/gui/qml/SettingsPage.qml
         SOURCES
+            src/gui/app_config.hpp
             src/gui/library_controller.hpp
             src/gui/mpv_item.hpp
             src/gui/shelf_model.hpp
@@ -173,6 +177,7 @@ if(SYNAXIS_BUILD_GUI)
     # __has_include guard and the QML_ELEMENT types fail to compile as undeclared.
     target_include_directories(synaxis_gui PRIVATE src/gui)
 
-    target_link_libraries(synaxis_gui PRIVATE synaxis_core Qt6::Network Qt6::Quick)
+    target_link_libraries(synaxis_gui PRIVATE
+        synaxis_core Qt6::Network Qt6::Quick Qt6::QuickDialogs2)
     target_compile_definitions(synaxis_gui PRIVATE SYNAXIS_VERSION="${PROJECT_VERSION}")
 endif()

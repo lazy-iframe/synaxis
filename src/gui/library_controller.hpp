@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include "app_config.hpp"
 #include "shelf_model.hpp"
 
 #include "synaxis/artwork.hpp"
@@ -25,6 +26,7 @@
 #include <QList>
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <QThread>
 #include <QUrl>
 #include <QtQml/qqmlregistration.h>
@@ -67,6 +69,13 @@ public slots:
     // Generate() is running, so it's atomic rather than a plain bool.
     void Cancel();
 
+    // Drops the provider chain so the next Generate() rebuilds it from
+    // scratch. Needed because the chain is built once, on first use, with
+    // whatever TMDB key was live at that moment — without this, a key typed
+    // into the settings page mid-session would never take effect until the
+    // app restarted.
+    void ResetCache();
+
 signals:
     void Ready(const QString& path, const QUrl& artwork);
     void Finished();
@@ -79,6 +88,25 @@ private:
 
     std::unique_ptr<ArtworkCache> cache_;
     std::atomic<bool> cancelled_{false};
+};
+
+// Walks the directories the settings page tracks and rebuilds library.json
+// from scratch. Off the UI thread for the same reason ArtworkWorker is: a
+// scan over a large tree takes long enough to notice, and nothing about
+// walking a filesystem needs the UI thread.
+class LibraryScanWorker : public QObject {
+    Q_OBJECT
+
+public slots:
+    // Scans each of `directories` and merges the results into one
+    // library.json at MediaLibrary::DefaultLibraryPath(). A path found under
+    // more than one directory keeps whichever scan visited it last, so
+    // overlapping roots don't produce a duplicate tile.
+    void Scan(const QStringList& directories);
+
+signals:
+    void Progress(int filesIndexed);
+    void Finished();
 };
 
 // The one object QML talks to.
@@ -126,6 +154,15 @@ class LibraryController : public QObject {
     Q_PROPERTY(double position READ position NOTIFY playbackChanged)
     Q_PROPERTY(double duration READ duration NOTIFY playbackChanged)
 
+    // Settings: the TMDB key and the directories RescanLibrary() walks, plus
+    // how a scan in progress is going. Every setter below persists the whole
+    // config and updates these in the same call, so the settings page never
+    // has to poll.
+    Q_PROPERTY(QString tmdbApiKey READ tmdbApiKey NOTIFY configChanged)
+    Q_PROPERTY(QStringList libraryDirectories READ libraryDirectories NOTIFY configChanged)
+    Q_PROPERTY(bool scanning READ scanning NOTIFY scanningChanged)
+    Q_PROPERTY(int scanFilesIndexed READ scanFilesIndexed NOTIFY scanningChanged)
+
 public:
     explicit LibraryController(QObject* parent = nullptr);
     ~LibraryController() override;
@@ -151,6 +188,11 @@ public:
     double position() const { return status_.position; }
     double duration() const { return status_.duration; }
 
+    QString tmdbApiKey() const { return config_.tmdb_api_key; }
+    QStringList libraryDirectories() const { return config_.library_directories; }
+    bool scanning() const { return scanning_; }
+    int scanFilesIndexed() const { return scan_files_indexed_; }
+
     // Reads library.json and watch.json and rebuilds the shelves, then starts
     // generating any artwork that isn't cached yet. Safe to call again.
     Q_INVOKABLE void Reload();
@@ -170,10 +212,31 @@ public:
     // exists; the controller owns the Player, so the item only ever borrows it.
     Q_INVOKABLE void AttachVideoOutput(QObject* item);
 
+    // Persists a new TMDB key and drops the artwork worker's cached provider
+    // chain so the next tile generated picks it up.
+    Q_INVOKABLE void SetTmdbApiKey(const QString& key);
+
+    // Tracks `directory` (a file:// URL, as FolderDialog reports selections)
+    // for RescanLibrary() to walk. Silently declined if it isn't a directory
+    // or is already tracked — there's nothing actionable for the user to fix
+    // in either case.
+    Q_INVOKABLE void AddLibraryDirectory(const QUrl& directory);
+
+    // Stops tracking `directory`. Entries already in library.json from it
+    // are left alone until the next rescan.
+    Q_INVOKABLE void RemoveLibraryDirectory(const QString& directory);
+
+    // Re-walks every tracked directory and rebuilds library.json from
+    // scratch, then reloads. No-op while a scan is already running, or if
+    // nothing is tracked.
+    Q_INVOKABLE void RescanLibrary();
+
 signals:
     void shelvesChanged();
     void heroArtworkChanged();
     void playbackChanged();
+    void configChanged();
+    void scanningChanged();
 
 private:
     void BuildShelves();
@@ -191,6 +254,9 @@ private:
     // Writes the current position to the watch store. Called at the moments
     // that matter rather than on every status tick.
     void Persist();
+
+    void OnScanProgress(int filesIndexed);
+    void OnScanFinished();
 
     // The display title for a media path, for the player overlay.
     QString TitleForPath(const QString& path) const;
@@ -211,12 +277,20 @@ private:
     WatchStore watch_;
     std::filesystem::path watch_path_;
 
+    AppConfig config_;
+    std::filesystem::path config_path_;
+
     QList<ShelfModel*> shelves_;
     std::unique_ptr<class ShelvesModel> shelves_model_;
     Tile hero_;
 
     QThread artwork_thread_;
     ArtworkWorker* artwork_worker_ = nullptr;
+
+    QThread scan_thread_;
+    LibraryScanWorker* scan_worker_ = nullptr;
+    bool scanning_ = false;
+    int scan_files_indexed_ = 0;
 
     // MpvEmbedded: no window of its own, drawn by whatever MpvItem is attached.
     // Constructed here rather than per-playback so the render context outlives

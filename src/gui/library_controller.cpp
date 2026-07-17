@@ -174,6 +174,45 @@ void ArtworkWorker::Generate(const std::vector<MediaEntry>& entries) {
 
 void ArtworkWorker::Cancel() { cancelled_ = true; }
 
+void ArtworkWorker::ResetCache() { cache_.reset(); }
+
+// ---------------------------------------------------------------------------
+// LibraryScanWorker
+// ---------------------------------------------------------------------------
+
+void LibraryScanWorker::Scan(const QStringList& directories) {
+    std::vector<MediaEntry> merged;
+    std::size_t indexed_so_far = 0;
+
+    for (const QString& dir : directories) {
+        auto on_progress = [&](const ScanProgress& progress) {
+            emit Progress(static_cast<int>(indexed_so_far + progress.files_indexed));
+            return true;
+        };
+
+        std::vector<MediaEntry> found =
+            MediaLibrary::Scan(std::filesystem::path(dir.toStdString()), {}, on_progress);
+        indexed_so_far += found.size();
+
+        // A later directory wins on a path collision, so overlapping roots
+        // (one tracked directory nested inside another) don't produce a
+        // duplicate tile.
+        for (MediaEntry& entry : found) {
+            auto it = std::find_if(merged.begin(), merged.end(), [&entry](const MediaEntry& e) {
+                return e.path == entry.path;
+            });
+            if (it != merged.end()) {
+                *it = std::move(entry);
+            } else {
+                merged.push_back(std::move(entry));
+            }
+        }
+    }
+
+    MediaLibrary::SaveToJson(merged, MediaLibrary::DefaultLibraryPath());
+    emit Finished();
+}
+
 // ---------------------------------------------------------------------------
 // LibraryController
 // ---------------------------------------------------------------------------
@@ -198,14 +237,24 @@ LibraryController* LibraryController::create(QQmlEngine*, QJSEngine*) {
 LibraryController::LibraryController(QObject* parent)
     : QObject(parent),
       watch_path_(WatchStore::DefaultPath()),
+      config_path_(DefaultConfigPath()),
       shelves_model_(std::make_unique<ShelvesModel>()) {
     qRegisterMetaType<std::vector<MediaEntry>>();
+
+    config_ = LoadAppConfig(config_path_);
 
     artwork_worker_ = new ArtworkWorker;
     artwork_worker_->moveToThread(&artwork_thread_);
     connect(&artwork_thread_, &QThread::finished, artwork_worker_, &QObject::deleteLater);
     connect(artwork_worker_, &ArtworkWorker::Ready, this, &LibraryController::OnArtworkReady);
     artwork_thread_.start();
+
+    scan_worker_ = new LibraryScanWorker;
+    scan_worker_->moveToThread(&scan_thread_);
+    connect(&scan_thread_, &QThread::finished, scan_worker_, &QObject::deleteLater);
+    connect(scan_worker_, &LibraryScanWorker::Progress, this, &LibraryController::OnScanProgress);
+    connect(scan_worker_, &LibraryScanWorker::Finished, this, &LibraryController::OnScanFinished);
+    scan_thread_.start();
 
     // The backend calls this from its own thread and must not block or re-enter
     // Player, so this does the one thing Player's docs prescribe: hop the value
@@ -223,12 +272,18 @@ LibraryController::~LibraryController() {
     if (artwork_worker_) artwork_worker_->Cancel();
     artwork_thread_.quit();
     artwork_thread_.wait();
+
+    scan_thread_.quit();
+    scan_thread_.wait();
 }
 
 QAbstractListModel* LibraryController::shelves() { return shelves_model_.get(); }
 
 
 void LibraryController::Reload() {
+    config_ = LoadAppConfig(config_path_);
+    emit configChanged();
+
     const std::filesystem::path library_path = MediaLibrary::DefaultLibraryPath();
 
     std::error_code ec;
@@ -466,6 +521,71 @@ QString LibraryController::TitleForPath(const QString& path) const {
         title += QStringLiteral(" · ") + FormatEpisode(it->metadata);
     }
     return title;
+}
+
+void LibraryController::SetTmdbApiKey(const QString& key) {
+    if (config_.tmdb_api_key == key) return;
+
+    config_.tmdb_api_key = key;
+    SaveAppConfig(config_, config_path_);
+    emit configChanged();
+
+    // The provider chain is built once, on first use, with whatever key was
+    // live at that moment. Without dropping it here, a key typed into the
+    // settings page mid-session would never take effect until the app
+    // restarted.
+    QMetaObject::invokeMethod(artwork_worker_, "ResetCache", Qt::QueuedConnection);
+}
+
+void LibraryController::AddLibraryDirectory(const QUrl& directory) {
+    if (!directory.isLocalFile()) return;
+
+    std::error_code ec;
+    const std::filesystem::path path = std::filesystem::canonical(
+        std::filesystem::path(directory.toLocalFile().toStdString()), ec);
+    if (ec || !std::filesystem::is_directory(path)) {
+        qWarning() << "not a directory:" << directory.toLocalFile();
+        return;
+    }
+
+    const QString canonical = ToQString(path);
+    if (config_.library_directories.contains(canonical)) return;
+
+    config_.library_directories.append(canonical);
+    SaveAppConfig(config_, config_path_);
+    emit configChanged();
+}
+
+void LibraryController::RemoveLibraryDirectory(const QString& directory) {
+    if (!config_.library_directories.removeOne(directory)) return;
+
+    SaveAppConfig(config_, config_path_);
+    emit configChanged();
+}
+
+void LibraryController::RescanLibrary() {
+    if (scanning_ || config_.library_directories.isEmpty()) return;
+
+    scanning_ = true;
+    scan_files_indexed_ = 0;
+    emit scanningChanged();
+
+    QMetaObject::invokeMethod(scan_worker_, "Scan", Qt::QueuedConnection,
+                              Q_ARG(QStringList, config_.library_directories));
+}
+
+void LibraryController::OnScanProgress(int filesIndexed) {
+    scan_files_indexed_ = filesIndexed;
+    emit scanningChanged();
+}
+
+void LibraryController::OnScanFinished() {
+    scanning_ = false;
+    emit scanningChanged();
+
+    // Rereads library.json, which the worker just rewrote, and rebuilds the
+    // shelves from it — the same path a fresh launch takes.
+    Reload();
 }
 
 void LibraryController::Persist() {
