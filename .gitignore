@@ -1,8 +1,11 @@
 # build files
 build
 
-# tests
-tests
+# Sample media: large binaries, and not something the tests depend on — they
+# generate their own fixtures with ffmpeg. The test sources under tests/ are
+# tracked, so this ignores the media directories rather than the whole tree.
+tests/movies
+tests/series
 
 # generated library index (machine-specific absolute paths); the real one
 # lives under $XDG_DATA_HOME/synaxis/

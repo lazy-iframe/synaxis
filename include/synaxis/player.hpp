@@ -40,7 +40,12 @@ public:
     // application. Mpv is the default and the intended foundation for the
     // GUI: its render API embeds natively on Wayland, which libvlc 3.x
     // cannot. Vlc is kept as a working comparison.
-    enum class Backend { Mpv, Vlc };
+    //
+    // MpvEmbedded is Mpv with no window of its own: it decodes into whatever
+    // surface the caller renders it to (see InitializeRenderer). It also has no
+    // bindings and no OSD, because there's no window for them to belong to —
+    // an embedding application draws its own controls.
+    enum class Backend { Mpv, Vlc, MpvEmbedded };
 
     enum class State {
         Idle,     // nothing loaded yet
@@ -82,7 +87,13 @@ public:
     // Starts playing `path` and returns immediately. False means the file
     // could not be handed to the backend at all; a failure discovered later
     // during decoding surfaces as State::Error instead.
-    bool Open(const std::filesystem::path& path);
+    //
+    // `start_position` seeks within the file as part of loading it, rather
+    // than leaving the caller to Seek() once playback begins: Open() queues
+    // the load and returns before the backend has anything loaded to seek
+    // within, so a Seek() issued right after Open() races the load and is
+    // silently dropped.
+    bool Open(const std::filesystem::path& path, double start_position = 0.0);
 
     void Pause();
     void Resume();
@@ -98,6 +109,41 @@ public:
     // "play and wait for the window to close" behaviour on an async core;
     // a GUI uses the status callback instead and never calls this.
     bool WaitUntilFinished();
+
+    // --- Embedded rendering (Backend::MpvEmbedded only) ---
+    //
+    // These exist so a toolkit can draw video into its own scene without this
+    // header knowing anything about that toolkit. mpv asks for GL entry points
+    // through a callback rather than linking them, so the only thing crossing
+    // this boundary is a function pointer — no Qt, no GL headers, no window
+    // system. The other backends ignore all of it.
+
+    // Supplies OpenGL entry points by name. Called by mpv, on the render
+    // thread, while the caller's GL context is current.
+    using GetProcAddress = void* (*)(void* ctx, const char* name);
+
+    // Creates the render context. Must be called on the thread that owns the
+    // GL context, with that context current, before the first RenderTo().
+    // False when the backend can't render into a surface (Mpv, Vlc) or the
+    // context couldn't be created.
+    bool InitializeRenderer(GetProcAddress get_proc_address, void* ctx);
+
+    // Draws the current frame into the bound framebuffer `fbo`, sized
+    // `width` x `height`. Render thread only, GL context current.
+    void RenderTo(int fbo, int width, int height);
+
+    // Invoked when a new frame is ready to draw.
+    //
+    // Called from mpv's own thread and subject to the same rules as
+    // StatusCallback: don't block, don't re-enter Player. Schedule a redraw and
+    // return — the actual RenderTo() belongs on the render thread.
+    void SetRenderUpdateCallback(std::function<void()> callback);
+
+    // Destroys the render context. Same thread rules as InitializeRenderer, and
+    // it must happen before the GL context goes away — the destructor can't do
+    // it, because by then the render thread may be gone and this object may be
+    // being destroyed on another one entirely.
+    void ShutdownRenderer();
 
 private:
     class Impl;

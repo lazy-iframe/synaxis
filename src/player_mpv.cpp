@@ -14,6 +14,7 @@
 #include "player_backend.hpp"
 
 #include <mpv/client.h>
+#include <mpv/render_gl.h>
 
 #include <iostream>
 #include <mutex>
@@ -57,11 +58,23 @@ public:
         if (mpv_) mpv_terminate_destroy(mpv_);
     }
 
-    bool Open(const std::filesystem::path& path) override {
+    bool Open(const std::filesystem::path& path, double start_position) override {
         Update([](Player::Status& s) { s = Player::Status{}; s.state = Player::State::Loading; });
 
         const std::string path_str = path.string();
-        const char* cmd[] = {"loadfile", path_str.c_str(), nullptr};
+
+        // loadfile queues the load and returns before mpv has anything open —
+        // MPV_EVENT_FILE_LOADED arrives later, on the pump thread. A Seek()
+        // issued right after this call would race that load and land on
+        // nothing, so the start position is passed as a per-file load option
+        // instead: mpv applies it once the file actually opens. The command's
+        // signature is `loadfile <url> [<flags> [<index> [<options>]]]` — the
+        // index slot has to be filled (with a no-op -1: it's only meaningful
+        // for insert-at) to reach the options slot at all.
+        const std::string start_opt =
+            start_position > 0.0 ? "start=" + std::to_string(start_position) : std::string();
+        const char* cmd[] = {"loadfile", path_str.c_str(), "replace", "-1",
+                              start_opt.empty() ? nullptr : start_opt.c_str(), nullptr};
         if (mpv_command(mpv_, cmd) < 0) {
             std::cerr << "error: failed to load file: " << path_str << "\n";
             return false;
@@ -82,6 +95,91 @@ public:
         const std::string target = std::to_string(seconds);
         const char* cmd[] = {"seek", target.c_str(), "absolute", nullptr};
         mpv_command(mpv_, cmd);
+    }
+
+    bool InitializeRenderer(Player::GetProcAddress get_proc_address, void* ctx) override {
+        if (render_) return true;
+
+        // mpv_opengl_init_params' get_proc_address has the same shape as
+        // Player::GetProcAddress by construction — the typedef exists so the
+        // public header can describe it without including mpv's.
+        mpv_opengl_init_params gl_params{};
+        gl_params.get_proc_address = get_proc_address;
+        gl_params.get_proc_address_ctx = ctx;
+
+        int api_type_unused = 1;
+        (void)api_type_unused;
+
+        mpv_render_param params[] = {
+            {MPV_RENDER_PARAM_API_TYPE, const_cast<char*>(MPV_RENDER_API_TYPE_OPENGL)},
+            {MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, &gl_params},
+            {MPV_RENDER_PARAM_INVALID, nullptr},
+        };
+
+        const int rc = mpv_render_context_create(&render_, mpv_, params);
+        if (rc < 0) {
+            std::cerr << "error: failed to create mpv render context: " << mpv_error_string(rc)
+                      << "\n";
+            render_ = nullptr;
+            return false;
+        }
+
+        // Fires from mpv's thread whenever a frame is ready. Deliberately does
+        // nothing but forward: the contract is that the callee schedules a
+        // redraw and returns.
+        mpv_render_context_set_update_callback(
+            render_,
+            [](void* self) {
+                auto* backend = static_cast<MpvBackend*>(self);
+                std::function<void()> callback;
+                {
+                    std::lock_guard<std::mutex> lock(backend->render_mutex_);
+                    callback = backend->on_render_update_;
+                }
+                if (callback) callback();
+            },
+            this);
+        return true;
+    }
+
+    void RenderTo(int fbo, int width, int height) override {
+        if (!render_) return;
+
+        mpv_opengl_fbo target{};
+        target.fbo = fbo;
+        target.w = width;
+        target.h = height;
+
+        // No FLIP_Y. It's tempting — OpenGL's origin is bottom-left and most
+        // toolkits' is top-left — but the caller hands us an FBO it will
+        // composite under GL's own convention, so mpv writing it the "right way
+        // up" is one flip too many and the video comes out inverted. Verified
+        // by looking: with FLIP_Y the sky is at the bottom.
+        mpv_render_param params[] = {
+            {MPV_RENDER_PARAM_OPENGL_FBO, &target},
+            {MPV_RENDER_PARAM_INVALID, nullptr},
+        };
+        mpv_render_context_render(render_, params);
+    }
+
+    void SetRenderUpdateCallback(std::function<void()> callback) override {
+        std::lock_guard<std::mutex> lock(render_mutex_);
+        on_render_update_ = std::move(callback);
+    }
+
+    void ShutdownRenderer() override {
+        if (!render_) return;
+
+        // Dropped first: the callback closes over the render thread's item, and
+        // mpv may still fire it while the context is being torn down.
+        {
+            std::lock_guard<std::mutex> lock(render_mutex_);
+            on_render_update_ = nullptr;
+        }
+        mpv_render_context_set_update_callback(render_, nullptr, nullptr);
+
+        mpv_render_context_free(render_);
+        render_ = nullptr;
     }
 
 private:
@@ -183,23 +281,37 @@ private:
     mutable std::mutex mutex_;
     Player::Status status_;
 
+    // Touched from the render thread (create/render/shutdown) and read from
+    // mpv's thread (the update callback), hence the separate lock: the status
+    // mutex is held while user code runs and this must never wait on that.
+    mpv_render_context* render_ = nullptr;
+    std::mutex render_mutex_;
+    std::function<void()> on_render_update_;
+
     std::thread pump_;
 };
 
 } // namespace
 
-std::unique_ptr<PlayerBackend> MakeMpvBackend(StatusHandler on_status) {
+std::unique_ptr<PlayerBackend> MakeMpvBackend(StatusHandler on_status, bool embedded) {
     mpv_handle* mpv = mpv_create();
     if (!mpv) {
         std::cerr << "error: failed to create mpv instance\n";
         return nullptr;
     }
 
-    // The standalone window keeps mpv's own bindings and OSD, so the CLI
-    // stays interactive. A future embedded (render API) path would turn these
-    // off and supply its own controls.
-    mpv_set_option_string(mpv, "input-default-bindings", "yes");
-    mpv_set_option_string(mpv, "input-vo-keyboard", "yes");
+    if (embedded) {
+        // vo=libmpv is what makes mpv render on demand through the render API
+        // instead of opening a window. Bindings and OSD stay off: they belong
+        // to a window that doesn't exist here, and the embedding application
+        // draws its own controls.
+        mpv_set_option_string(mpv, "vo", "libmpv");
+    } else {
+        // The standalone window keeps mpv's own bindings and OSD, so the CLI
+        // stays interactive.
+        mpv_set_option_string(mpv, "input-default-bindings", "yes");
+        mpv_set_option_string(mpv, "input-vo-keyboard", "yes");
+    }
 
     if (mpv_initialize(mpv) < 0) {
         std::cerr << "error: failed to initialize mpv\n";

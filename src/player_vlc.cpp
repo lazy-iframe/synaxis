@@ -60,7 +60,7 @@ public:
         libvlc_release(vlc_);
     }
 
-    bool Open(const std::filesystem::path& path) override {
+    bool Open(const std::filesystem::path& path, double start_position) override {
         Update([](Player::Status& s) { s = Player::Status{}; s.state = Player::State::Loading; });
 
         const std::string path_str = path.string();
@@ -68,6 +68,14 @@ public:
         if (!media) {
             std::cerr << "error: failed to load file: " << path_str << "\n";
             return false;
+        }
+
+        // Set as a media option rather than Seek() after play(): play() also
+        // only starts an async open, and seeking before libvlc has finished
+        // opening the demuxer is a no-op, same race as the mpv backend.
+        if (start_position > 0.0) {
+            const std::string start_opt = ":start-time=" + std::to_string(start_position);
+            libvlc_media_add_option(media, start_opt.c_str());
         }
 
         libvlc_media_player_set_media(player_, media);

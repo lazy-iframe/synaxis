@@ -36,15 +36,27 @@ class PlayerBackend {
 public:
     virtual ~PlayerBackend() = default;
 
-    virtual bool Open(const std::filesystem::path& path) = 0;
+    virtual bool Open(const std::filesystem::path& path, double start_position) = 0;
     virtual void Pause() = 0;
     virtual void Resume() = 0;
     virtual void Stop() = 0;
     virtual void Seek(double seconds) = 0;
+
+    // Embedded rendering. Defaulted to "can't", so a backend that brings its
+    // own window — which is all of them but embedded mpv — doesn't have to say
+    // so. See Player's declarations for the threading rules.
+    virtual bool InitializeRenderer(Player::GetProcAddress, void*) { return false; }
+    virtual void RenderTo(int /*fbo*/, int /*width*/, int /*height*/) {}
+    virtual void SetRenderUpdateCallback(std::function<void()>) {}
+    virtual void ShutdownRenderer() {}
 };
 
 // Both return nullptr if the underlying library can't be initialized.
-std::unique_ptr<PlayerBackend> MakeMpvBackend(StatusHandler on_status);
+//
+// `embedded` gives mpv no window of its own (vo=libmpv), leaving it to render
+// through the render API instead. It also drops the default key bindings and
+// OSD, which belong to a window that no longer exists.
+std::unique_ptr<PlayerBackend> MakeMpvBackend(StatusHandler on_status, bool embedded = false);
 std::unique_ptr<PlayerBackend> MakeVlcBackend(StatusHandler on_status);
 
 } // namespace synaxis::detail

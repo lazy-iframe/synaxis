@@ -32,7 +32,7 @@ public:
         user_callback_ = std::move(callback);
     }
 
-    bool Open(const std::filesystem::path& path) {
+    bool Open(const std::filesystem::path& path, double start_position) {
         if (!EnsureBackend()) return false;
 
         // Reset before handing off: the backend may report Playing from
@@ -43,7 +43,7 @@ public:
             status_.state = State::Loading;
         }
 
-        if (!backend_->Open(path)) {
+        if (!backend_->Open(path, start_position)) {
             Publish([](Status& s) { s.state = State::Error; });
             return false;
         }
@@ -66,6 +66,27 @@ public:
         if (backend_) backend_->Seek(seconds);
     }
 
+    bool InitializeRenderer(Player::GetProcAddress get_proc_address, void* ctx) {
+        // The renderer can be set up before anything is opened — a video
+        // surface exists as soon as the scene does — so this has to be able to
+        // bring the backend into being rather than assuming Open() already did.
+        if (!EnsureBackend()) return false;
+        return backend_->InitializeRenderer(get_proc_address, ctx);
+    }
+
+    void RenderTo(int fbo, int width, int height) {
+        if (backend_) backend_->RenderTo(fbo, width, height);
+    }
+
+    void SetRenderUpdateCallback(std::function<void()> callback) {
+        if (!EnsureBackend()) return;
+        backend_->SetRenderUpdateCallback(std::move(callback));
+    }
+
+    void ShutdownRenderer() {
+        if (backend_) backend_->ShutdownRenderer();
+    }
+
     Status GetStatus() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return status_;
@@ -86,8 +107,17 @@ private:
         if (backend_) return true;
 
         auto handler = [this](const Status& status) { OnBackendStatus(status); };
-        backend_ = backend_kind_ == Backend::Vlc ? detail::MakeVlcBackend(handler)
-                                                  : detail::MakeMpvBackend(handler);
+        switch (backend_kind_) {
+            case Backend::Vlc:
+                backend_ = detail::MakeVlcBackend(handler);
+                break;
+            case Backend::MpvEmbedded:
+                backend_ = detail::MakeMpvBackend(handler, /*embedded=*/true);
+                break;
+            case Backend::Mpv:
+                backend_ = detail::MakeMpvBackend(handler, /*embedded=*/false);
+                break;
+        }
         return backend_ != nullptr;
     }
 
@@ -129,7 +159,9 @@ void Player::SetStatusCallback(StatusCallback callback) {
     impl_->SetStatusCallback(std::move(callback));
 }
 
-bool Player::Open(const std::filesystem::path& path) { return impl_->Open(path); }
+bool Player::Open(const std::filesystem::path& path, double start_position) {
+    return impl_->Open(path, start_position);
+}
 
 void Player::Pause() { impl_->Pause(); }
 
@@ -142,5 +174,17 @@ void Player::Seek(double seconds) { impl_->Seek(seconds); }
 Player::Status Player::GetStatus() const { return impl_->GetStatus(); }
 
 bool Player::WaitUntilFinished() { return impl_->WaitUntilFinished(); }
+
+bool Player::InitializeRenderer(GetProcAddress get_proc_address, void* ctx) {
+    return impl_->InitializeRenderer(get_proc_address, ctx);
+}
+
+void Player::RenderTo(int fbo, int width, int height) { impl_->RenderTo(fbo, width, height); }
+
+void Player::SetRenderUpdateCallback(std::function<void()> callback) {
+    impl_->SetRenderUpdateCallback(std::move(callback));
+}
+
+void Player::ShutdownRenderer() { impl_->ShutdownRenderer(); }
 
 } // namespace synaxis
