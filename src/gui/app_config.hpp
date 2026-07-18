@@ -34,6 +34,12 @@ namespace synaxis::gui {
 struct AppConfig {
     QString tmdb_api_key;
     QStringList library_directories;  // absolute paths; RescanLibrary() walks each one
+
+    // Extensions (lowercase, no leading dot) a scan is limited to — the GUI
+    // counterpart of the CLI's -x flag. Empty means "all supported types",
+    // exactly as an omitted -x does; entries are validated against
+    // MediaLibrary::DefaultVideoExtensions() before they get here.
+    QStringList scan_extensions;
 };
 
 // A missing or malformed file yields a default-constructed (empty) config

@@ -180,9 +180,12 @@ void ArtworkWorker::ResetCache() { cache_.reset(); }
 // LibraryScanWorker
 // ---------------------------------------------------------------------------
 
-void LibraryScanWorker::Scan(const QStringList& directories) {
+void LibraryScanWorker::Scan(const QStringList& directories, const QStringList& extensions) {
     std::vector<MediaEntry> merged;
     std::size_t indexed_so_far = 0;
+
+    std::vector<std::string> extension_filter;
+    for (const QString& extension : extensions) extension_filter.push_back(extension.toStdString());
 
     for (const QString& dir : directories) {
         auto on_progress = [&](const ScanProgress& progress) {
@@ -190,8 +193,8 @@ void LibraryScanWorker::Scan(const QStringList& directories) {
             return true;
         };
 
-        std::vector<MediaEntry> found =
-            MediaLibrary::Scan(std::filesystem::path(dir.toStdString()), {}, on_progress);
+        std::vector<MediaEntry> found = MediaLibrary::Scan(
+            std::filesystem::path(dir.toStdString()), extension_filter, on_progress);
         indexed_so_far += found.size();
 
         // A later directory wins on a path collision, so overlapping roots
@@ -417,12 +420,14 @@ void LibraryController::AttachVideoOutput(QObject* item) {
         return;
     }
 
+    qInfo() << "player: video surface attached";
     video->SetPlayer(&player_);
     connect(video, &MpvItem::RendererReady, this, &LibraryController::OnRendererReady,
             Qt::UniqueConnection);
 }
 
 void LibraryController::OnRendererReady() {
+    qInfo() << "player: renderer ready, frame capture started";
     renderer_ready_ = true;
     OpenPending();
 }
@@ -439,6 +444,9 @@ void LibraryController::OpenPending() {
     // and is silently dropped.
     const double resume = watch_.ResumePosition(media);
 
+    qInfo() << "player: opening" << ToQString(media)
+            << (resume > 0.0 ? QStringLiteral("(resuming at %1s)").arg(resume, 0, 'f', 1)
+                             : QStringLiteral("(from the start)"));
     if (!player_.Open(media, resume)) {
         qWarning() << "playback failed to start:" << ToQString(media);
         playing_path_.clear();
@@ -451,6 +459,7 @@ void LibraryController::OpenPending() {
 void LibraryController::Play(const QString& path) {
     if (path.isEmpty()) return;
 
+    qInfo() << "player: play requested" << path;
     const std::filesystem::path media(path.toStdString());
     std::error_code ec;
     if (!std::filesystem::exists(media, ec)) {
@@ -475,6 +484,9 @@ void LibraryController::Play(const QString& path) {
 
 void LibraryController::Close() {
     if (playing_path_.isEmpty()) return;
+
+    qInfo() << "player: quit at" << QStringLiteral("%1s").arg(status_.position, 0, 'f', 1)
+            << "-" << playing_path_;
 
     // Save before stopping. Stop() reports Ended, and mpv zeroes time-pos on
     // unload, so waiting for the callback would record a position of 0 and
@@ -507,6 +519,7 @@ void LibraryController::TogglePause() {
 
 void LibraryController::Seek(double seconds) {
     if (playing_path_.isEmpty()) return;
+    qInfo() << "player: seek to" << QStringLiteral("%1s").arg(seconds, 0, 'f', 1);
     player_.Seek(seconds);
 }
 
@@ -563,15 +576,59 @@ void LibraryController::RemoveLibraryDirectory(const QString& directory) {
     emit configChanged();
 }
 
+QStringList LibraryController::availableExtensions() {
+    QStringList extensions;
+    for (const std::string& extension : MediaLibrary::DefaultVideoExtensions()) {
+        extensions.append(QString::fromStdString(extension));
+    }
+    return extensions;
+}
+
+void LibraryController::SetScanExtensions(const QString& extensions) {
+    // Same tolerance as the CLI's -x parsing: ".mp4, MKV" and "mp4,mkv" mean
+    // the same thing.
+    const QStringList known = availableExtensions();
+    QStringList parsed;
+    for (QString token : extensions.split(QLatin1Char(','), Qt::SkipEmptyParts)) {
+        token = token.trimmed().toLower();
+        if (token.startsWith(QLatin1Char('.'))) token.remove(0, 1);
+        if (token.isEmpty() || parsed.contains(token)) continue;
+
+        // Dropped rather than kept-but-ignored: a typo'd "mkv4" that stayed
+        // in the filter would silently exclude everything it was meant to
+        // match. The warning plus the field snapping back to the accepted
+        // list is the feedback.
+        if (!known.contains(token)) {
+            qWarning() << "library: unknown extension" << token << "- available:"
+                       << known.join(',');
+            continue;
+        }
+        parsed.append(token);
+    }
+
+    if (config_.scan_extensions == parsed) return;
+
+    qInfo() << "library: scan extensions set to"
+            << (parsed.isEmpty() ? QStringLiteral("(all)") : parsed.join(','));
+    config_.scan_extensions = parsed;
+    SaveAppConfig(config_, config_path_);
+    emit configChanged();
+}
+
 void LibraryController::RescanLibrary() {
     if (scanning_ || config_.library_directories.isEmpty()) return;
 
+    qInfo() << "library: scan started over" << config_.library_directories.size()
+            << "directories" << config_.library_directories << "types"
+            << (config_.scan_extensions.isEmpty() ? QStringLiteral("(all)")
+                                                  : config_.scan_extensions.join(','));
     scanning_ = true;
     scan_files_indexed_ = 0;
     emit scanningChanged();
 
     QMetaObject::invokeMethod(scan_worker_, "Scan", Qt::QueuedConnection,
-                              Q_ARG(QStringList, config_.library_directories));
+                              Q_ARG(QStringList, config_.library_directories),
+                              Q_ARG(QStringList, config_.scan_extensions));
 }
 
 void LibraryController::OnScanProgress(int filesIndexed) {
@@ -580,6 +637,7 @@ void LibraryController::OnScanProgress(int filesIndexed) {
 }
 
 void LibraryController::OnScanFinished() {
+    qInfo() << "library: scan finished," << scan_files_indexed_ << "files indexed";
     scanning_ = false;
     emit scanningChanged();
 
@@ -592,6 +650,9 @@ void LibraryController::Persist() {
     if (playing_path_.isEmpty()) return;
     if (status_.position <= 0.0) return;
 
+    qInfo() << "player: progress saved at"
+            << QStringLiteral("%1s / %2s").arg(status_.position, 0, 'f', 1)
+                   .arg(status_.duration, 0, 'f', 1);
     watch_.Record(std::filesystem::path(playing_path_.toStdString()), status_.position,
                   status_.duration);
     watch_.SaveToJson(watch_path_);
@@ -603,6 +664,33 @@ void LibraryController::OnPlayerStatus(const Player::Status& status) {
     const Player::State previous = status_.state;
     status_ = status;
     emit playbackChanged();
+
+    // Positions tick several times a second; only the transitions are events
+    // worth a line on the terminal.
+    if (previous != status.state) {
+        switch (status.state) {
+            case Player::State::Idle:
+                qInfo() << "player: idle";
+                break;
+            case Player::State::Loading:
+                qInfo() << "player: loading";
+                break;
+            case Player::State::Playing:
+                qInfo() << (previous == Player::State::Paused ? "player: played (resumed)"
+                                                              : "player: played");
+                break;
+            case Player::State::Paused:
+                qInfo() << "player: paused at"
+                        << QStringLiteral("%1s").arg(status.position, 0, 'f', 1);
+                break;
+            case Player::State::Ended:
+                qInfo() << "player: ended";
+                break;
+            case Player::State::Error:
+                qWarning() << "player: playback error reported for" << playing_path_;
+                break;
+        }
+    }
 
     // Positions arrive several times a second, so the file write waits for a
     // moment that actually matters rather than riding every tick.
@@ -624,6 +712,16 @@ void LibraryController::OnPlayerStatus(const Player::Status& status) {
     if (previous != status.state) {
         playing_path_.clear();
         playing_title_.clear();
+
+        // The Loader watching Library.playing tears the overlay down right
+        // along with playing_path_, taking the render context with it — same
+        // as Close(). Without this, renderer_ready_ is left stale at true, so
+        // the next Play() races OpenPending() ahead of the new renderer's
+        // RendererReady signal and loadfile lands before mpv has anywhere to
+        // render, which is the "no audio or video data played" failure this
+        // very state transition just reported.
+        renderer_ready_ = false;
+
         BuildShelves();
         emit shelvesChanged();
         emit playbackChanged();

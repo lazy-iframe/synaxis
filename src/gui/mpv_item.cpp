@@ -13,6 +13,7 @@
 
 #include "mpv_item.hpp"
 
+#include <QDebug>
 #include <QOpenGLContext>
 #include <QOpenGLFramebufferObject>
 #include <QPointer>
@@ -44,7 +45,10 @@ public:
         // is safe. Leaving it to Player's destructor would run it on the UI
         // thread with no context — mpv would either crash or leak the GPU
         // resources it allocated.
-        if (initialized_ && player_) player_->ShutdownRenderer();
+        if (initialized_ && player_) {
+            qInfo() << "player: render context shut down";
+            player_->ShutdownRenderer();
+        }
     }
 
     void synchronize(QQuickFramebufferObject* item) override {
@@ -102,6 +106,18 @@ public:
         if (window_) window_->beginExternalCommands();
         player_->RenderTo(static_cast<int>(target->handle()), target->width(), target->height());
         if (window_) window_->endExternalCommands();
+
+        // Once per renderer, on the first frame rendered with a file actually
+        // loaded — the moment "playing" stops being a promise and becomes
+        // pixels. The state check skips the black frame the scene graph asks
+        // for before anything is open.
+        if (!first_frame_logged_) {
+            const Player::State state = player_->GetStatus().state;
+            if (state == Player::State::Playing || state == Player::State::Paused) {
+                first_frame_logged_ = true;
+                qInfo() << "player: frames streaming";
+            }
+        }
     }
 
 private:
@@ -111,6 +127,7 @@ private:
     // Loader deactivates) while this renderer is still winding down.
     QPointer<MpvItem> item_;
     bool initialized_ = false;
+    bool first_frame_logged_ = false;
 };
 
 // Vertical orientation is mpv's job, not Qt's: the backend passes FLIP_Y to

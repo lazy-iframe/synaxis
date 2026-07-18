@@ -101,8 +101,9 @@ public slots:
     // Scans each of `directories` and merges the results into one
     // library.json at MediaLibrary::DefaultLibraryPath(). A path found under
     // more than one directory keeps whichever scan visited it last, so
-    // overlapping roots don't produce a duplicate tile.
-    void Scan(const QStringList& directories);
+    // overlapping roots don't produce a duplicate tile. `extensions` limits
+    // the walk to those file types; empty means every supported type.
+    void Scan(const QStringList& directories, const QStringList& extensions);
 
 signals:
     void Progress(int filesIndexed);
@@ -163,8 +164,20 @@ class LibraryController : public QObject {
     Q_PROPERTY(bool scanning READ scanning NOTIFY scanningChanged)
     Q_PROPERTY(int scanFilesIndexed READ scanFilesIndexed NOTIFY scanningChanged)
 
+    // The extension filter scans honour (empty: every supported type), and
+    // the universe of types the settings page can offer. The GUI face of the
+    // CLI's -x flag.
+    Q_PROPERTY(QStringList scanExtensions READ scanExtensions NOTIFY configChanged)
+    Q_PROPERTY(QStringList availableExtensions READ availableExtensions CONSTANT)
+
 public:
-    explicit LibraryController(QObject* parent = nullptr);
+    // `parent` deliberately has no default. Qt's singleton registration
+    // prefers a default constructor over a static create() when both exist
+    // (see singletonConstructionMode() in qqmlprivate.h), so a defaulted
+    // parent makes the engine silently construct its own second instance and
+    // ignore the one main() registered through SetInstance() — every
+    // Q_INVOKABLE from QML then lands on an object nobody else can see.
+    explicit LibraryController(QObject* parent);
     ~LibraryController() override;
 
     // Hands QML the instance main() already owns, rather than letting the
@@ -192,6 +205,8 @@ public:
     QStringList libraryDirectories() const { return config_.library_directories; }
     bool scanning() const { return scanning_; }
     int scanFilesIndexed() const { return scan_files_indexed_; }
+    QStringList scanExtensions() const { return config_.scan_extensions; }
+    static QStringList availableExtensions();
 
     // Reads library.json and watch.json and rebuilds the shelves, then starts
     // generating any artwork that isn't cached yet. Safe to call again.
@@ -225,6 +240,12 @@ public:
     // Stops tracking `directory`. Entries already in library.json from it
     // are left alone until the next rescan.
     Q_INVOKABLE void RemoveLibraryDirectory(const QString& directory);
+
+    // Persists the extension filter, parsed from a comma-separated list the
+    // way the CLI parses -x: whitespace and leading dots are tolerated, case
+    // is ignored, and anything outside availableExtensions() is dropped with
+    // a warning. An empty result means "scan every supported type".
+    Q_INVOKABLE void SetScanExtensions(const QString& extensions);
 
     // Re-walks every tracked directory and rebuilds library.json from
     // scratch, then reloads. No-op while a scan is already running, or if

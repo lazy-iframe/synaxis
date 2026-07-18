@@ -25,7 +25,15 @@ Window {
 
     property bool settingsOpen: false
 
-    Component.onCompleted: Library.Reload()
+    // Reload first so the shelves render immediately from the last scan's
+    // library.json; the rescan then walks the tracked directories in the
+    // background and refreshes them when it finishes (RescanLibrary ends with
+    // its own Reload). A no-op when nothing is tracked, so a library built
+    // only with synaxis_cli is left exactly as the CLI wrote it.
+    Component.onCompleted: {
+        Library.Reload();
+        Library.RescanLibrary();
+    }
 
     // The shelves, with the hero riding along as the header so the whole page
     // scrolls as one — the billboard sliding away under the nav bar is most of

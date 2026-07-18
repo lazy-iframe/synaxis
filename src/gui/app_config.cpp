@@ -38,6 +38,9 @@ AppConfig LoadAppConfig(const std::filesystem::path& path) {
     for (const QJsonValue& value : object.value("library_directories").toArray()) {
         config.library_directories.append(value.toString());
     }
+    for (const QJsonValue& value : object.value("scan_extensions").toArray()) {
+        config.scan_extensions.append(value.toString());
+    }
     return config;
 }
 
@@ -48,9 +51,13 @@ void SaveAppConfig(const AppConfig& config, const std::filesystem::path& path) {
     QJsonArray directories;
     for (const QString& directory : config.library_directories) directories.append(directory);
 
+    QJsonArray extensions;
+    for (const QString& extension : config.scan_extensions) extensions.append(extension);
+
     QJsonObject object;
     object.insert("tmdb_api_key", config.tmdb_api_key);
     object.insert("library_directories", directories);
+    object.insert("scan_extensions", extensions);
 
     QFile file(QString::fromStdString(path.string()));
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {

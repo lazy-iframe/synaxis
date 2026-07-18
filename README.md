@@ -98,7 +98,11 @@ synaxis_gui
 
 Reads the same library the CLI builds. On first run the library is empty;
 either run `synaxis_cli -d <directory>` or add a directory from the settings
-page (see below) and rescan.
+page (see below) and rescan. Once directories are tracked in settings, the
+GUI also rescans them automatically at every startup: the shelves render
+immediately from the previous scan's results, then refresh when the
+background rescan finishes. With no tracked directories nothing is scanned,
+so a library built only with the CLI is left exactly as the CLI wrote it.
 
 Playback is embedded directly in the window via libmpv's render API — there's
 no separate mpv window — with an on-screen overlay (play/pause, scrubber,
@@ -115,7 +119,10 @@ The gear icon in the top-right corner opens a settings page covering:
   **Rescan Library** to rebuild `library.json` from all of them at once. This
   is the GUI equivalent of running `synaxis_cli -d <directory>` once per
   directory; scanning several directories merges their entries, and a file
-  found under more than one keeps whichever scan visited it last.
+  found under more than one keeps whichever scan visited it last. A file-type
+  filter (comma-separated, e.g. `mkv, mp4`) limits what scans pick up — the
+  GUI equivalent of the CLI's `-x` — and empty means every supported type.
+  It applies to the Rescan button and the automatic startup rescan alike.
 - **Player backend** — informational for now. The embedded player only
   supports mpv (libVLC has no embedding API this GUI can render into); `-b
   vlc` remains available from the CLI.
@@ -129,8 +136,27 @@ Tiles are 16:9 and come from the first source that can supply one:
 2. **Extracted frames** — a frame from the video itself, via libmpv. Always
    available, needs no network or account.
 
-To enable TMDB, set your key from the GUI's settings page, or put it directly
-in `$XDG_CONFIG_HOME/synaxis/config.json` (falling back to
+#### Getting a TMDB API key
+
+Synaxis ships no built-in key — each user brings their own. Keys are free:
+[create a TMDB account](https://www.themoviedb.org/signup), then request an
+API key under [Settings → API](https://www.themoviedb.org/settings/api)
+(choose the v3 key; the whole process takes a couple of minutes).
+
+This is deliberate, not an omission. A TMDB key is a personal credential
+issued under TMDB's terms of use — anything bundled with the app would be
+published to every user and fork, with all their requests counted against
+one account. TMDB's terms also attach conditions (such as non-commercial
+use) to each registration, which cannot be imposed on downstream users of a
+GPL application. Bring-your-own-key keeps both licenses honest.
+
+This product uses the TMDB API but is not endorsed or certified by
+[TMDB](https://www.themoviedb.org/).
+
+#### Configuring the key
+
+Set your key from the GUI's settings page, or put it directly in
+`$XDG_CONFIG_HOME/synaxis/config.json` (falling back to
 `~/.config/synaxis/config.json`):
 
 ```json

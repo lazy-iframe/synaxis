@@ -57,7 +57,7 @@ int main(int argc, char** argv) {
     // LibraryController::create() (see the QML_SINGLETON there), not through a
     // registration call here — registering into the Synaxis URI from outside
     // the module silently disables the module's own type registration.
-    synaxis::gui::LibraryController library;
+    synaxis::gui::LibraryController library(nullptr);
     synaxis::gui::LibraryController::SetInstance(&library);
 
     QQmlApplicationEngine engine;

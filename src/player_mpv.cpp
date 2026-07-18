@@ -41,6 +41,9 @@ public:
         mpv_observe_property(mpv_, kTimePos, "time-pos", MPV_FORMAT_DOUBLE);
         mpv_observe_property(mpv_, kDuration, "duration", MPV_FORMAT_DOUBLE);
         mpv_observe_property(mpv_, kPause, "pause", MPV_FORMAT_FLAG);
+        // Warnings and errors only: mpv's info/verbose levels narrate every
+        // demuxer step and would bury the events the terminal is watched for.
+        mpv_request_log_messages(mpv_, "warn");
         pump_ = std::thread([this] { PumpEvents(); });
     }
 
@@ -261,6 +264,12 @@ private:
                 case MPV_EVENT_END_FILE:
                     HandleEndFile(*static_cast<mpv_event_end_file*>(event->data));
                     break;
+                case MPV_EVENT_LOG_MESSAGE: {
+                    // text arrives newline-terminated.
+                    const auto& msg = *static_cast<mpv_event_log_message*>(event->data);
+                    std::cerr << "mpv " << msg.level << " [" << msg.prefix << "] " << msg.text;
+                    break;
+                }
                 case MPV_EVENT_SHUTDOWN:
                     // The window was closed, or we asked the core to quit.
                     // Either way no further events arrive, so settle in a

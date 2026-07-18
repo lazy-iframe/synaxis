@@ -190,6 +190,18 @@ Item {
                             }
                         }
                     }
+
+                    // TMDB's required attribution for applications using
+                    // their API. Keys are the user's own — see the README's
+                    // "Getting a TMDB API key" for why none ships with the app.
+                    Text {
+                        width: parent.width
+                        text: qsTr("This product uses the TMDB API but is not endorsed " +
+                                   "or certified by TMDB.")
+                        color: Theme.textSecondary
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
                 }
             }
 
@@ -286,6 +298,55 @@ Item {
                         }
                     }
 
+                    // The GUI face of the CLI's -x flag: limit scans to these
+                    // file types. Saved on Return and applied automatically
+                    // when Rescan is clicked; the field snaps back to the
+                    // accepted list, so a rejected typo is visible feedback.
+                    Text {
+                        width: parent.width
+                        text: qsTr("File types to scan, comma-separated (e.g. \"mkv, mp4\"). " +
+                                   "Leave empty for all supported types: %1.")
+                              .arg(Library.availableExtensions.join(", "))
+                        color: Theme.textSecondary
+                        font.pixelSize: 13
+                        wrapMode: Text.WordWrap
+                    }
+
+                    Rectangle {
+                        width: parent.width
+                        height: 40
+                        radius: Theme.radius
+                        color: Theme.background
+                        border.width: 1
+                        border.color: extensionsInput.activeFocus ? Theme.accent : "#333333"
+
+                        TextInput {
+                            id: extensionsInput
+
+                            anchors.fill: parent
+                            anchors.margins: 10
+                            verticalAlignment: TextInput.AlignVCenter
+                            color: Theme.textPrimary
+                            font.pixelSize: 14
+                            clip: true
+                            selectByMouse: true
+
+                            Component.onCompleted: text = Library.scanExtensions.join(", ")
+                            Keys.onReturnPressed: Library.SetScanExtensions(text)
+
+                            // Reflect the accepted (normalized, validated)
+                            // list back — but never while the user is still
+                            // typing in it.
+                            Connections {
+                                target: Library
+                                function onConfigChanged() {
+                                    if (!extensionsInput.activeFocus)
+                                        extensionsInput.text = Library.scanExtensions.join(", ");
+                                }
+                            }
+                        }
+                    }
+
                     Row {
                         spacing: 12
 
@@ -326,7 +387,12 @@ Item {
                             }
                             TapHandler {
                                 enabled: !Library.scanning && Library.libraryDirectories.length > 0
-                                onTapped: Library.RescanLibrary()
+                                onTapped: {
+                                    // A filter typed but not yet committed with
+                                    // Return still applies to the scan being asked for.
+                                    Library.SetScanExtensions(extensionsInput.text);
+                                    Library.RescanLibrary();
+                                }
                             }
 
                             Row {
