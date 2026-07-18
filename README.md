@@ -8,6 +8,8 @@ filenames, and plays a chosen file via [libmpv](https://mpv.io/) or
 Offline by default: nothing reaches the network unless you configure a TMDB
 API key, and the GUI works fully without one (see [Artwork](#artwork)).
 
+![screenshot](assets/capture0.png)
+
 ## Build
 
 Dependencies: CMake 3.20+, a C++20 compiler, [nlohmann_json](https://github.com/nlohmann/json),
